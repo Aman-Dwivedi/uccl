@@ -56,14 +56,10 @@ class CollectiveContext:
                 "torch.distributed must be initialized before creating CollectiveContext"
             )
 
-        if dist.get_backend() != "gloo":
-            raise RuntimeError(
-                "CollectiveContext requires torch.distributed to use 'gloo' backend"
-            )
-
         self.num_cpus = num_cpus
         self.rank = dist.get_rank()
         self.world_size = dist.get_world_size()
+        self.backend = dist.get_backend()
 
         # Derive local GPU index from distributed context
         if local_gpu_idx is not None:
@@ -144,15 +140,27 @@ class CollectiveContext:
         # Exchange metadata with all peers using torch.distributed
         all_metadata = [None] * self.world_size
 
-        # Gather all metadata
+        # Gather all metadata (handle NCCL vs Gloo backends)
         metadata_tensor = torch.ByteTensor(list(local_metadata))
-        gathered_tensors = [
-            torch.zeros_like(metadata_tensor) for _ in range(self.world_size)
-        ]
-        dist.all_gather(gathered_tensors, metadata_tensor)
-
-        for i, tensor in enumerate(gathered_tensors):
-            all_metadata[i] = bytes(tensor.tolist())
+        
+        if self.backend == "nccl":
+            # NCCL requires GPU tensors
+            metadata_tensor = metadata_tensor.cuda()
+            gathered_tensors = [
+                torch.zeros_like(metadata_tensor) for _ in range(self.world_size)
+            ]
+            dist.all_gather(gathered_tensors, metadata_tensor)
+            # Move back to CPU and convert
+            for i, tensor in enumerate(gathered_tensors):
+                all_metadata[i] = bytes(tensor.cpu().tolist())
+        else:
+            # Gloo and other backends work with CPU tensors
+            gathered_tensors = [
+                torch.zeros_like(metadata_tensor) for _ in range(self.world_size)
+            ]
+            dist.all_gather(gathered_tensors, metadata_tensor)
+            for i, tensor in enumerate(gathered_tensors):
+                all_metadata[i] = bytes(tensor.tolist())
 
         # Establish connections with all other ranks
         self._establish_connections(all_metadata)
