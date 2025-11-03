@@ -172,6 +172,14 @@ class CollectiveContext:
         if dist.get_backend() == "nccl":
             torch.cuda.synchronize(device)
 
+        # Barrier to ensure all ranks have exchanged metadata before establishing connections
+        # This helps avoid race conditions during socket connection establishment
+        dist.barrier()
+        
+        # Small delay to let sockets stabilize (helps with non-blocking socket writes)
+        import time
+        time.sleep(0.1)
+
         # Establish connections with all other ranks
         self._establish_connections(all_metadata)
         self.initialized = True
